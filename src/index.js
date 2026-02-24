@@ -2,6 +2,7 @@ import {
   Client,
   GatewayIntentBits,
   Partials,
+  MessageFlags,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -48,6 +49,24 @@ function parseBirthday(str) {
 function parseDateOnly(str) {
   const [y, m, d] = str.split('-').map((n) => parseInt(n, 10));
   return new Date(y, m - 1, d);
+}
+
+function parseCityState(input) {
+  const raw = input.trim();
+  if (!raw) return null;
+  if (raw.includes(',')) {
+    const parts = raw.split(',');
+    const state = parts.pop().trim();
+    const city = parts.join(',').trim();
+    if (city && state) return { city, state };
+    return null;
+  }
+  const lastSpace = raw.lastIndexOf(' ');
+  if (lastSpace === -1) return null;
+  const city = raw.slice(0, lastSpace).trim();
+  const state = raw.slice(lastSpace + 1).trim();
+  if (city && state) return { city, state };
+  return null;
 }
 
 async function fetchUrlMeta(url) {
@@ -170,154 +189,45 @@ async function updatePayment(thread, cycle, payerId, paidAt, override, note) {
   await postPaidStatus(thread, cycle.id, participants, thread.guild);
 }
 
-async function handleRegister(interaction) {
-  const birthdayStr = interaction.options.getString('birthday');
-  const date = parseBirthday(birthdayStr);
-  if (!date) {
-    await interaction.reply({ content: 'Invalid birthday format. Use YYYY-MM-DD.', ephemeral: true });
-    return;
-  }
-
-  const modal = new ModalBuilder()
-    .setCustomId(`register1:${birthdayStr}`)
-    .setTitle('Birthday Registration (1/2)');
-
-  const fullName = new TextInputBuilder()
-    .setCustomId('fullName')
-    .setLabel('Full name (optional)')
-    .setRequired(false)
-    .setStyle(TextInputStyle.Short);
-
-  const address1 = new TextInputBuilder()
-    .setCustomId('address_line1')
-    .setLabel('Address Line 1')
-    .setRequired(true)
-    .setStyle(TextInputStyle.Short);
-
-  const address2 = new TextInputBuilder()
-    .setCustomId('address_line2')
-    .setLabel('Address Line 2 (optional)')
-    .setRequired(false)
-    .setStyle(TextInputStyle.Short);
-
-  const city = new TextInputBuilder()
-    .setCustomId('city')
-    .setLabel('City')
-    .setRequired(true)
-    .setStyle(TextInputStyle.Short);
-
-  const state = new TextInputBuilder()
-    .setCustomId('state')
-    .setLabel('State')
-    .setRequired(true)
-    .setStyle(TextInputStyle.Short);
-
-  modal.addComponents(
-    new ActionRowBuilder().addComponents(fullName),
-    new ActionRowBuilder().addComponents(address1),
-    new ActionRowBuilder().addComponents(address2),
-    new ActionRowBuilder().addComponents(city),
-    new ActionRowBuilder().addComponents(state)
-  );
-
-  await interaction.showModal(modal);
-}
-
-async function handleRegisterModalStep1(interaction) {
-  const [, birthdayStr] = interaction.customId.split(':');
-  const date = parseBirthday(birthdayStr);
-  if (!date) {
-    await interaction.reply({ content: 'Invalid birthday format.', ephemeral: true });
-    return;
-  }
-
-  const partial = {
-    name: interaction.fields.getTextInputValue('fullName') || null,
-    address_line1: interaction.fields.getTextInputValue('address_line1'),
-    address_line2: interaction.fields.getTextInputValue('address_line2') || null,
-    city: interaction.fields.getTextInputValue('city'),
-    state: interaction.fields.getTextInputValue('state')
-  };
-
-  await withClient(async (db) => {
-    await db.query(
-      `INSERT INTO registration_sessions (discord_user_id, birthday, data_json)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (discord_user_id)
-       DO UPDATE SET birthday = EXCLUDED.birthday, data_json = EXCLUDED.data_json, created_at = NOW()`,
-      [interaction.user.id, birthdayStr, JSON.stringify(partial)]
-    );
-  });
-
-  const modal = new ModalBuilder()
-    .setCustomId(`register2:${birthdayStr}`)
-    .setTitle('Birthday Registration (2/2)');
-
-  const postal = new TextInputBuilder()
-    .setCustomId('postalCode')
-    .setLabel('ZIP / Postal Code')
-    .setRequired(true)
-    .setStyle(TextInputStyle.Short);
-
-  const country = new TextInputBuilder()
-    .setCustomId('country')
-    .setLabel('Country (default US)')
-    .setRequired(false)
-    .setStyle(TextInputStyle.Short);
-
-  const venmo = new TextInputBuilder()
-    .setCustomId('venmoHandle')
-    .setLabel('Venmo handle (optional)')
-    .setRequired(false)
-    .setStyle(TextInputStyle.Short);
-
-  const zelle = new TextInputBuilder()
-    .setCustomId('zelleInfo')
-    .setLabel('Zelle info (optional)')
-    .setRequired(false)
-    .setStyle(TextInputStyle.Short);
-
-  modal.addComponents(
-    new ActionRowBuilder().addComponents(postal),
-    new ActionRowBuilder().addComponents(country),
-    new ActionRowBuilder().addComponents(venmo),
-    new ActionRowBuilder().addComponents(zelle)
-  );
-
-  await interaction.showModal(modal);
-}
-
-async function handleRegisterModalStep2(interaction) {
-  const [, birthdayStr] = interaction.customId.split(':');
-  const date = parseBirthday(birthdayStr);
-  if (!date) {
-    await interaction.reply({ content: 'Invalid birthday format.', ephemeral: true });
-    return;
-  }
-
+async function handleRegisterModal(interaction) {
   const session = await withClient(async (db) => {
-    const res = await db.query('SELECT * FROM registration_sessions WHERE discord_user_id = $1', [interaction.user.id]);
+    const res = await db.query('SELECT birthday FROM registration_sessions WHERE discord_user_id = $1', [interaction.user.id]);
     return res.rows[0];
   });
   if (!session) {
-    await interaction.reply({ content: 'Registration session expired. Please run /register again.', ephemeral: true });
+    await interaction.reply({ content: 'Registration session expired. Please run /register again.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const birthdayStr = String(session.birthday).slice(0, 10);
+  if (!parseBirthday(birthdayStr)) {
+    await interaction.reply({ content: 'Invalid birthday format. Use YYYY-MM-DD.', flags: MessageFlags.Ephemeral });
     return;
   }
 
-  const partial = session.data_json || {};
+  const addressLine1 = interaction.fields.getTextInputValue('address_line1').trim();
+  const cityStateRaw = interaction.fields.getTextInputValue('city_state');
+  const cityState = parseCityState(cityStateRaw);
+  const postalCode = interaction.fields.getTextInputValue('postalCode').trim();
+  if (!addressLine1 || !cityState || !postalCode) {
+    await interaction.reply({
+      content: 'Please provide Address Line 1, City/State, and ZIP / Postal Code.',
+      flags: MessageFlags.Ephemeral
+    });
+    return;
+  }
+
   const address = {
-    line1: partial.address_line1,
-    line2: partial.address_line2 || null,
-    city: partial.city,
-    state: partial.state,
-    postalCode: interaction.fields.getTextInputValue('postalCode'),
-    country: interaction.fields.getTextInputValue('country') || 'US'
+    line1: addressLine1,
+    line2: null,
+    city: cityState.city,
+    state: cityState.state,
+    postalCode,
+    country: 'US'
   };
 
   const encrypted = encryptAddress(address);
-  const name = partial.name || null;
-  const venmo = interaction.fields.getTextInputValue('venmoHandle') || null;
-  const zelle = interaction.fields.getTextInputValue('zelleInfo') || null;
+  const venmo = interaction.fields.getTextInputValue('venmoHandle').trim() || null;
+  const zelle = interaction.fields.getTextInputValue('zelleInfo').trim() || null;
 
   const existed = await withClient(async (db) => {
     const res = await db.query('SELECT 1 FROM users WHERE discord_user_id = $1', [interaction.user.id]);
@@ -327,17 +237,17 @@ async function handleRegisterModalStep2(interaction) {
   await withClient(async (db) => {
     await db.query(
       `INSERT INTO users (discord_user_id, birthday, venmo, zelle, name, address_ciphertext, address_iv, address_version)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       VALUES ($1, $2, $3, $4, NULL, $5, $6, $7)
        ON CONFLICT (discord_user_id)
-       DO UPDATE SET birthday = EXCLUDED.birthday, venmo = EXCLUDED.venmo, zelle = EXCLUDED.zelle, name = EXCLUDED.name,
+       DO UPDATE SET birthday = EXCLUDED.birthday, venmo = EXCLUDED.venmo, zelle = EXCLUDED.zelle,
        address_ciphertext = EXCLUDED.address_ciphertext, address_iv = EXCLUDED.address_iv, address_version = EXCLUDED.address_version,
        updated_at = NOW()`,
-      [interaction.user.id, birthdayStr, venmo, zelle, name, encrypted.ciphertext, encrypted.iv, encrypted.version]
+      [interaction.user.id, birthdayStr, venmo, zelle, encrypted.ciphertext, encrypted.iv, encrypted.version]
     );
     await db.query('DELETE FROM registration_sessions WHERE discord_user_id = $1', [interaction.user.id]);
   });
 
-  await interaction.reply({ content: existed ? 'Registration updated.' : 'Registration saved.', ephemeral: true });
+  await interaction.reply({ content: existed ? 'Registration updated.' : 'Registration saved.', flags: MessageFlags.Ephemeral });
 }
 
 function ensureThreadOnly(interaction) {
@@ -350,16 +260,16 @@ function ensureThreadOnly(interaction) {
 
 async function handleSuggest(interaction) {
   if (!ensureThreadOnly(interaction)) {
-    await interaction.reply({ content: 'Please run this command inside a birthday thread.', ephemeral: true });
+    await interaction.reply({ content: 'Please run this command inside a birthday thread.', flags: MessageFlags.Ephemeral });
     return;
   }
   const cycle = await getCycleByThread(interaction.channelId);
   if (!cycle) {
-    await interaction.reply({ content: 'No active cycle found for this thread.', ephemeral: true });
+    await interaction.reply({ content: 'No active cycle found for this thread.', flags: MessageFlags.Ephemeral });
     return;
   }
   if (interaction.user.id === cycle.birthday_discord_user_id) {
-    await interaction.reply({ content: 'Birthday person cannot suggest.', ephemeral: true });
+    await interaction.reply({ content: 'Birthday person cannot suggest.', flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -373,18 +283,18 @@ async function handleSuggest(interaction) {
   });
 
   if (count >= 3) {
-    await interaction.reply({ content: 'Suggestion limit reached (3 per user).', ephemeral: true });
+    await interaction.reply({ content: 'Suggestion limit reached (3 per user).', flags: MessageFlags.Ephemeral });
     return;
   }
   if (latest) {
     const diff = Date.now() - new Date(latest).getTime();
     if (diff < 60 * 1000) {
-      await interaction.reply({ content: 'Please wait 1 minute between suggestions.', ephemeral: true });
+      await interaction.reply({ content: 'Please wait 1 minute between suggestions.', flags: MessageFlags.Ephemeral });
       return;
     }
   }
 
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   const meta = await fetchUrlMeta(url);
   const embed = new EmbedBuilder()
     .setTitle(meta.title || 'Gift Suggestion')
@@ -410,20 +320,20 @@ async function handleSuggest(interaction) {
 
 async function handleClaim(interaction) {
   if (!ensureThreadOnly(interaction)) {
-    await interaction.reply({ content: 'Please run this command inside a birthday thread.', ephemeral: true });
+    await interaction.reply({ content: 'Please run this command inside a birthday thread.', flags: MessageFlags.Ephemeral });
     return;
   }
   const cycle = await getCycleByThread(interaction.channelId);
   if (!cycle) {
-    await interaction.reply({ content: 'No active cycle found for this thread.', ephemeral: true });
+    await interaction.reply({ content: 'No active cycle found for this thread.', flags: MessageFlags.Ephemeral });
     return;
   }
   if (!cycle.winner_suggestion_id) {
-    await interaction.reply({ content: 'Voting is not closed yet.', ephemeral: true });
+    await interaction.reply({ content: 'Voting is not closed yet.', flags: MessageFlags.Ephemeral });
     return;
   }
   if (interaction.user.id === cycle.birthday_discord_user_id) {
-    await interaction.reply({ content: 'Birthday person cannot claim.', ephemeral: true });
+    await interaction.reply({ content: 'Birthday person cannot claim.', flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -437,7 +347,7 @@ async function handleClaim(interaction) {
   });
 
   if (!updated) {
-    await interaction.reply({ content: 'Purchaser already claimed.', ephemeral: true });
+    await interaction.reply({ content: 'Purchaser already claimed.', flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -455,39 +365,39 @@ async function handleClaim(interaction) {
     );
   }
 
-  await interaction.reply({ content: 'You are the purchaser. Check your DMs for the address.', ephemeral: true });
+  await interaction.reply({ content: 'You are the purchaser. Check your DMs for the address.', flags: MessageFlags.Ephemeral });
 }
 
 async function handleReceipt(interaction) {
   if (!ensureThreadOnly(interaction)) {
-    await interaction.reply({ content: 'Please run this command inside a birthday thread.', ephemeral: true });
+    await interaction.reply({ content: 'Please run this command inside a birthday thread.', flags: MessageFlags.Ephemeral });
     return;
   }
   const cycle = await getCycleByThread(interaction.channelId);
   if (!cycle) {
-    await interaction.reply({ content: 'No active cycle found for this thread.', ephemeral: true });
+    await interaction.reply({ content: 'No active cycle found for this thread.', flags: MessageFlags.Ephemeral });
     return;
   }
   if (interaction.user.id !== cycle.purchaser_discord_user_id) {
-    await interaction.reply({ content: 'Only the purchaser can post the receipt.', ephemeral: true });
+    await interaction.reply({ content: 'Only the purchaser can post the receipt.', flags: MessageFlags.Ephemeral });
     return;
   }
 
   const total = interaction.options.getNumber('total');
   if (!total || total <= 0) {
-    await interaction.reply({ content: 'Invalid receipt total.', ephemeral: true });
+    await interaction.reply({ content: 'Invalid receipt total.', flags: MessageFlags.Ephemeral });
     return;
   }
 
   const { channel } = await getGuildAndChannel();
   if (!channel) {
-    await interaction.reply({ content: 'Channel not found.', ephemeral: true });
+    await interaction.reply({ content: 'Channel not found.', flags: MessageFlags.Ephemeral });
     return;
   }
   const participants = await getParticipantsForChannel(channel, cycle.birthday_discord_user_id);
   const count = participants.length;
   if (count === 0) {
-    await interaction.reply({ content: 'No participants found for split.', ephemeral: true });
+    await interaction.reply({ content: 'No participants found for split.', flags: MessageFlags.Ephemeral });
     return;
   }
   const split = Math.round((total / count) * 100) / 100;
@@ -523,32 +433,32 @@ async function handleReceipt(interaction) {
 
 async function handlePaid(interaction) {
   if (!ensureThreadOnly(interaction)) {
-    await interaction.reply({ content: 'Please run this command inside a birthday thread.', ephemeral: true });
+    await interaction.reply({ content: 'Please run this command inside a birthday thread.', flags: MessageFlags.Ephemeral });
     return;
   }
   const cycle = await getCycleByThread(interaction.channelId);
   if (!cycle || !cycle.participants_snapshot_json) {
-    await interaction.reply({ content: 'Receipt not posted yet.', ephemeral: true });
+    await interaction.reply({ content: 'Receipt not posted yet.', flags: MessageFlags.Ephemeral });
     return;
   }
   const participants = cycle.participants_snapshot_json || [];
   if (!participants.includes(interaction.user.id)) {
-    await interaction.reply({ content: 'You are not in the participant list for this cycle.', ephemeral: true });
+    await interaction.reply({ content: 'You are not in the participant list for this cycle.', flags: MessageFlags.Ephemeral });
     return;
   }
 
   await updatePayment(interaction.channel, cycle, interaction.user.id, new Date().toISOString(), false, null);
-  await interaction.reply({ content: 'Marked as paid.', ephemeral: true });
+  await interaction.reply({ content: 'Marked as paid.', flags: MessageFlags.Ephemeral });
 }
 
 async function handleStatus(interaction) {
   if (!ensureThreadOnly(interaction)) {
-    await interaction.reply({ content: 'Please run this command inside a birthday thread.', ephemeral: true });
+    await interaction.reply({ content: 'Please run this command inside a birthday thread.', flags: MessageFlags.Ephemeral });
     return;
   }
   const cycle = await getCycleByThread(interaction.channelId);
   if (!cycle) {
-    await interaction.reply({ content: 'No active cycle found for this thread.', ephemeral: true });
+    await interaction.reply({ content: 'No active cycle found for this thread.', flags: MessageFlags.Ephemeral });
     return;
   }
   const purchaser = cycle.purchaser_discord_user_id ? `<@${cycle.purchaser_discord_user_id}>` : 'Unclaimed';
@@ -556,14 +466,14 @@ async function handleStatus(interaction) {
   const receipt = cycle.receipt_total ? `$${Number(cycle.receipt_total).toFixed(2)}` : 'Not posted';
   await interaction.reply({
     content: `Status:\nWinner: ${winner}\nPurchaser: ${purchaser}\nReceipt: ${receipt}`,
-    ephemeral: true
+    flags: MessageFlags.Ephemeral
   });
 }
 
 async function handleProfile(interaction) {
   const user = await getUserRow(interaction.user.id);
   if (!user) {
-    await interaction.reply({ content: 'No profile found. Use /register first.', ephemeral: true });
+    await interaction.reply({ content: 'No profile found. Use /register first.', flags: MessageFlags.Ephemeral });
     return;
   }
   const address = decryptAddress({ ciphertext: user.address_ciphertext, iv: user.address_iv });
@@ -574,21 +484,21 @@ async function handleProfile(interaction) {
     `Venmo: ${user.venmo || 'Not set'}`,
     `Zelle: ${user.zelle || 'Not set'}`
   ];
-  await interaction.reply({ content: lines.join('\\n'), ephemeral: true });
+  await interaction.reply({ content: lines.join('\\n'), flags: MessageFlags.Ephemeral });
 }
 
 async function handleMarkPaid(interaction, isPaid) {
   if (!ensureThreadOnly(interaction)) {
-    await interaction.reply({ content: 'Please run this command inside a birthday thread.', ephemeral: true });
+    await interaction.reply({ content: 'Please run this command inside a birthday thread.', flags: MessageFlags.Ephemeral });
     return;
   }
   const cycle = await getCycleByThread(interaction.channelId);
   if (!cycle) {
-    await interaction.reply({ content: 'No active cycle found for this thread.', ephemeral: true });
+    await interaction.reply({ content: 'No active cycle found for this thread.', flags: MessageFlags.Ephemeral });
     return;
   }
   if (interaction.user.id !== cycle.purchaser_discord_user_id) {
-    await interaction.reply({ content: 'Only the purchaser can use this.', ephemeral: true });
+    await interaction.reply({ content: 'Only the purchaser can use this.', flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -597,7 +507,7 @@ async function handleMarkPaid(interaction, isPaid) {
 
   await updatePayment(interaction.channel, cycle, target.id, isPaid ? new Date().toISOString() : null, true, note);
 
-  await interaction.reply({ content: `${target.username} marked as ${isPaid ? 'paid' : 'unpaid'}.`, ephemeral: true });
+  await interaction.reply({ content: `${target.username} marked as ${isPaid ? 'paid' : 'unpaid'}.`, flags: MessageFlags.Ephemeral });
   await interaction.channel.send(`Audit: ${interaction.user.username} marked ${target.username} as ${isPaid ? 'paid' : 'unpaid'}${note ? ` (${note})` : ''}.`);
 }
 
@@ -798,9 +708,69 @@ client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
       switch (interaction.commandName) {
-        case 'register':
-          await handleRegister(interaction);
-          break;
+        case 'register': {
+          const birthdayStr = interaction.options.getString('birthday');
+          const date = parseBirthday(birthdayStr);
+          if (!date) {
+            await interaction.reply({ content: 'Invalid birthday format. Use YYYY-MM-DD.', flags: MessageFlags.Ephemeral });
+            return;
+          }
+
+          await withClient(async (db) => {
+            await db.query(
+              `INSERT INTO registration_sessions (discord_user_id, birthday, data_json)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (discord_user_id)
+               DO UPDATE SET birthday = EXCLUDED.birthday, data_json = EXCLUDED.data_json, created_at = NOW()`,
+              [interaction.user.id, birthdayStr, JSON.stringify({})]
+            );
+          });
+
+          const modal = new ModalBuilder()
+            .setCustomId('register_step_1')
+            .setTitle('Birthday Registration');
+
+          const address1 = new TextInputBuilder()
+            .setCustomId('address_line1')
+            .setLabel('Address Line 1 (Apt/Suite if needed)')
+            .setRequired(true)
+            .setStyle(TextInputStyle.Short);
+
+          const city = new TextInputBuilder()
+            .setCustomId('city_state')
+            .setLabel('City, State')
+            .setRequired(true)
+            .setStyle(TextInputStyle.Short);
+
+          const postal = new TextInputBuilder()
+            .setCustomId('postalCode')
+            .setLabel('ZIP / Postal Code')
+            .setRequired(true)
+            .setStyle(TextInputStyle.Short);
+
+          const venmo = new TextInputBuilder()
+            .setCustomId('venmoHandle')
+            .setLabel('Venmo handle (optional)')
+            .setRequired(false)
+            .setStyle(TextInputStyle.Short);
+
+          const zelle = new TextInputBuilder()
+            .setCustomId('zelleInfo')
+            .setLabel('Zelle info (optional)')
+            .setRequired(false)
+            .setStyle(TextInputStyle.Short);
+
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(address1),
+            new ActionRowBuilder().addComponents(city),
+            new ActionRowBuilder().addComponents(postal),
+            new ActionRowBuilder().addComponents(venmo),
+            new ActionRowBuilder().addComponents(zelle)
+          );
+
+          await interaction.showModal(modal);
+          return;
+        }
         case 'suggest':
           await handleSuggest(interaction);
           break;
@@ -829,16 +799,14 @@ client.on('interactionCreate', async (interaction) => {
           break;
       }
     } else if (interaction.isModalSubmit()) {
-      if (interaction.customId.startsWith('register1:')) {
-        await handleRegisterModalStep1(interaction);
-      } else if (interaction.customId.startsWith('register2:')) {
-        await handleRegisterModalStep2(interaction);
+      if (interaction.customId === 'register_step_1') {
+        await handleRegisterModal(interaction);
       }
     }
   } catch (err) {
     console.error(err);
     if (interaction.isRepliable()) {
-      await interaction.reply({ content: 'Something went wrong.', ephemeral: true }).catch(() => null);
+      await interaction.reply({ content: 'Something went wrong.', flags: MessageFlags.Ephemeral }).catch(() => null);
     }
   }
 });
