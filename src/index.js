@@ -255,7 +255,7 @@ async function handleRegisterModalStep1(interaction) {
 
   const postal = new TextInputBuilder()
     .setCustomId('postalCode')
-    .setLabel('Postal Code')
+    .setLabel('ZIP / Postal Code')
     .setRequired(true)
     .setStyle(TextInputStyle.Short);
 
@@ -319,6 +319,11 @@ async function handleRegisterModalStep2(interaction) {
   const venmo = interaction.fields.getTextInputValue('venmoHandle') || null;
   const zelle = interaction.fields.getTextInputValue('zelleInfo') || null;
 
+  const existed = await withClient(async (db) => {
+    const res = await db.query('SELECT 1 FROM users WHERE discord_user_id = $1', [interaction.user.id]);
+    return res.rowCount === 1;
+  });
+
   await withClient(async (db) => {
     await db.query(
       `INSERT INTO users (discord_user_id, birthday, venmo, zelle, name, address_ciphertext, address_iv, address_version)
@@ -332,7 +337,7 @@ async function handleRegisterModalStep2(interaction) {
     await db.query('DELETE FROM registration_sessions WHERE discord_user_id = $1', [interaction.user.id]);
   });
 
-  await interaction.reply({ content: 'Registration saved.', ephemeral: true });
+  await interaction.reply({ content: existed ? 'Registration updated.' : 'Registration saved.', ephemeral: true });
 }
 
 function ensureThreadOnly(interaction) {
@@ -553,6 +558,23 @@ async function handleStatus(interaction) {
     content: `Status:\nWinner: ${winner}\nPurchaser: ${purchaser}\nReceipt: ${receipt}`,
     ephemeral: true
   });
+}
+
+async function handleProfile(interaction) {
+  const user = await getUserRow(interaction.user.id);
+  if (!user) {
+    await interaction.reply({ content: 'No profile found. Use /register first.', ephemeral: true });
+    return;
+  }
+  const address = decryptAddress({ ciphertext: user.address_ciphertext, iv: user.address_iv });
+  const masked = `${address.city}, ${address.state}${address.country ? ` (${address.country})` : ''}`;
+  const lines = [
+    `Birthday: ${String(user.birthday).slice(0, 10)}`,
+    `Address: ${masked}`,
+    `Venmo: ${user.venmo || 'Not set'}`,
+    `Zelle: ${user.zelle || 'Not set'}`
+  ];
+  await interaction.reply({ content: lines.join('\\n'), ephemeral: true });
 }
 
 async function handleMarkPaid(interaction, isPaid) {
@@ -793,6 +815,9 @@ client.on('interactionCreate', async (interaction) => {
           break;
         case 'status':
           await handleStatus(interaction);
+          break;
+        case 'profile':
+          await handleProfile(interaction);
           break;
         case 'mark-paid':
           await handleMarkPaid(interaction, true);

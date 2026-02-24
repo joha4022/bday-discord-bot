@@ -36,6 +36,9 @@ const commands = [
     .setName('status')
     .setDescription('Show cycle status (thread only)'),
   new SlashCommandBuilder()
+    .setName('profile')
+    .setDescription('Show your stored birthday and payment info'),
+  new SlashCommandBuilder()
     .setName('mark-paid')
     .setDescription('Purchaser override: mark a user paid')
     .addUserOption((opt) =>
