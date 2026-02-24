@@ -39,8 +39,10 @@ function addDays(date, days) {
 }
 
 function parseBirthday(str) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(str)) return null;
-  const [y, m, d] = str.split('-').map((n) => parseInt(n, 10));
+  if (!str) return null;
+  const s = str.trim().replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, '-');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const [y, m, d] = s.split('-').map((n) => parseInt(n, 10));
   const date = new Date(y, m - 1, d);
   if (date.getFullYear() !== y || date.getMonth() !== m - 1 || date.getDate() !== d) return null;
   return date;
@@ -200,7 +202,10 @@ async function handleRegisterModal(interaction) {
   }
   const birthdayStr = String(session.birthday).slice(0, 10);
   if (!parseBirthday(birthdayStr)) {
-    await interaction.reply({ content: 'Invalid birthday format. Use YYYY-MM-DD.', flags: MessageFlags.Ephemeral });
+    await interaction.reply({
+      content: `Invalid birthday format. Use YYYY-MM-DD. Received: "${birthdayStr}"`,
+      flags: MessageFlags.Ephemeral
+    });
     return;
   }
 
@@ -712,7 +717,10 @@ client.on('interactionCreate', async (interaction) => {
           const birthdayStr = interaction.options.getString('birthday');
           const date = parseBirthday(birthdayStr);
           if (!date) {
-            await interaction.reply({ content: 'Invalid birthday format. Use YYYY-MM-DD.', flags: MessageFlags.Ephemeral });
+            await interaction.reply({
+              content: `Invalid birthday format. Use YYYY-MM-DD. Received: "${birthdayStr}"`,
+              flags: MessageFlags.Ephemeral
+            });
             return;
           }
 
