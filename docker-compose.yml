@@ -1,0 +1,50 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: circlebot
+      POSTGRES_PASSWORD: circlebot
+      POSTGRES_DB: circlebot
+      TZ: ${TZ}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  circlebot:
+    image: node:20
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+      CLIENT_ID: ${CLIENT_ID}
+      GUILD_ID: ${GUILD_ID}
+      BDAY_CHANNEL_ID: ${BDAY_CHANNEL_ID}
+      DATABASE_URL: ${DATABASE_URL}
+      ADDRESS_ENCRYPTION_KEY: ${ADDRESS_ENCRYPTION_KEY}
+      TZ: ${TZ}
+    volumes:
+      - ./:/app
+    command: sh -c "npm install && npm run migrate && npm run register:commands && npm run start"
+    depends_on:
+      - postgres
+
+  pg_backup:
+    image: alpine:3.19
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGUSER: circlebot
+      PGPASSWORD: circlebot
+      PGDATABASE: circlebot
+      TZ: ${TZ}
+    volumes:
+      - /mnt/user/backups/autogift/:/backups
+      - ./docker/backup/backup.sh:/backup.sh
+    depends_on:
+      - postgres
+    command: sh -c "apk add --no-cache postgresql-client tzdata && chmod +x /backup.sh && echo '0 3 * * * /backup.sh' > /etc/crontabs/root && crond -f -l 8"
+
+volumes:
+  pgdata:
