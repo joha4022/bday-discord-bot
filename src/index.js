@@ -118,7 +118,11 @@ async function getGuildAndChannel() {
   if (CONFIG.GUILD_ID) {
     guild = await client.guilds.fetch(CONFIG.GUILD_ID).catch(() => null);
   } else {
-    const fetchedChannel = await client.channels.fetch(CONFIG.BDAY_CHANNEL_ID).catch(() => null);
+    const fetchedChannel = await client.channels.fetch(CONFIG.BDAY_CHANNEL_ID).catch((err) => {
+      console.error('getGuildAndChannel: channel fetch failed:', err);
+      return null;
+    });
+    console.log(`getGuildAndChannel: fetched channel by id=${CONFIG.BDAY_CHANNEL_ID} -> ${fetchedChannel ? fetchedChannel.id : 'null'}`);
     if (fetchedChannel && fetchedChannel.guild) {
       return { guild: fetchedChannel.guild, channel: fetchedChannel };
     }
