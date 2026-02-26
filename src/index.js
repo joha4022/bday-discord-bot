@@ -919,6 +919,7 @@ client.on('error', (err) => {
 
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
+  console.log(`Config: GUILD_ID=${CONFIG.GUILD_ID || 'unset'} BDAY_CHANNEL_ID=${CONFIG.BDAY_CHANNEL_ID || 'unset'}`);
   cron.schedule(CONFIG.DAILY_CRON, dailyCheckGuarded, { timezone: CONFIG.TZ });
   await dailyCheckGuarded();
 });
