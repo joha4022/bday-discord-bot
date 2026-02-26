@@ -26,6 +26,7 @@ const client = new Client({
 });
 
 const TEST_MODE = String(process.env.TEST_MODE || '').toLowerCase() === 'true';
+const NOTIFICATIONS_ENABLED = String(process.env.NOTIFICATIONS_ENABLED ?? 'true').toLowerCase() !== 'false';
 let dailyCheckRunning = false;
 
 function toLocalDateString(date) {
@@ -555,19 +556,30 @@ async function dailyCheck() {
     const nameBase = user.name || (await guild.members.fetch(user.discord_user_id).catch(() => null))?.displayName || 'member';
     const threadName = `${nameBase.toLowerCase().replace(/\s+/g, '-')}-${toLocalDateString(bday)}`;
 
-    let message;
-    if (TEST_MODE) {
-      console.log('TEST_MODE: notification skipped');
-      message = await channel.send('.');
-    } else {
-      message = await channel.send(`Birthday cycle starting for <@${user.discord_user_id}>. Thread created.`);
-    }
-    const thread = await message.startThread({ name: threadName, autoArchiveDuration: 1440 });
-    if (TEST_MODE) {
-      await message.delete().catch(() => null);
-    }
+    const thread = await channel.threads.create({
+      name: threadName,
+      autoArchiveDuration: 1440,
+      reason: 'Birthday cycle starting'
+    });
 
     await thread.permissionOverwrites.edit(user.discord_user_id, { ViewChannel: false });
+
+    if (!NOTIFICATIONS_ENABLED) {
+      console.log('NOTIFICATIONS_ENABLED=false: skipping DMs');
+    } else {
+      const members = await thread.members.fetch().catch(() => null);
+      if (members) {
+        for (const [memberId, member] of members) {
+          if (memberId === user.discord_user_id) continue;
+          if (memberId === client.user.id) continue;
+          try {
+            await member.user.send(`New birthday thread created: ${thread.name}\n${thread.url}`);
+          } catch (err) {
+            console.error(`DM failed for ${memberId}: ${err?.message || err}`);
+          }
+        }
+      }
+    }
 
     await thread.send(
       'Welcome! Flow: suggest gifts with /suggest, vote with 👍, winner picked at T-5. After winner: /claim, then purchaser posts /receipt. Participants use /paid.'
