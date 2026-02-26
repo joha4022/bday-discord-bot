@@ -544,18 +544,21 @@ async function handleMarkPaid(interaction, isPaid) {
 }
 
 async function dailyCheck() {
+  console.log('dailyCheck: start');
   const { guild, channel } = await getGuildAndChannel();
   if (!guild || !channel) return;
   await ensureCircle(guild.id);
 
   const today = new Date();
   const todayStr = toTzDateString(today);
+  console.log(`dailyCheck: todayStr=${todayStr}`);
 
   // Create threads at T-21
   const users = await withClient(async (db) => {
     const res = await db.query('SELECT * FROM users');
     return res.rows;
   });
+  console.log(`dailyCheck: users=${users.length}`);
 
   for (const user of users) {
     try {
