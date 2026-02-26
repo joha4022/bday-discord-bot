@@ -200,7 +200,9 @@ async function handleRegisterModal(interaction) {
     await interaction.reply({ content: 'Registration session expired. Please run /register again.', flags: MessageFlags.Ephemeral });
     return;
   }
-  const birthdayStr = String(session.birthday).slice(0, 10);
+  const birthdayStr = session.birthday instanceof Date
+    ? toLocalDateString(session.birthday)
+    : String(session.birthday).trim();
   if (!parseBirthday(birthdayStr)) {
     await interaction.reply({
       content: `Invalid birthday format. Use YYYY-MM-DD. Received: "${birthdayStr}"`,
@@ -714,15 +716,16 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isChatInputCommand()) {
       switch (interaction.commandName) {
         case 'register': {
-          const birthdayStr = interaction.options.getString('birthday');
-          const date = parseBirthday(birthdayStr);
+          const birthdayRaw = interaction.options.getString('birthday', true);
+          const date = parseBirthday(birthdayRaw);
           if (!date) {
             await interaction.reply({
-              content: `Invalid birthday format. Use YYYY-MM-DD. Received: "${birthdayStr}"`,
+              content: `Invalid birthday format. Use YYYY-MM-DD. Received: "${birthdayRaw}"`,
               flags: MessageFlags.Ephemeral
             });
             return;
           }
+          const birthdayStr = toLocalDateString(date);
 
           await withClient(async (db) => {
             await db.query(
