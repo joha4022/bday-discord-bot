@@ -71,6 +71,26 @@ CREATE INDEX IF NOT EXISTS idx_cycles_status ON cycles(status);
 CREATE INDEX IF NOT EXISTS idx_cycles_receipt_at ON cycles(receipt_at);
 CREATE INDEX IF NOT EXISTS idx_suggestions_cycle ON suggestions(cycle_id);
 CREATE INDEX IF NOT EXISTS idx_payments_cycle ON payments(cycle_id);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    WHERE t.relname = 'cycles'
+      AND c.contype = 'u'
+      AND c.conkey = ARRAY[
+        (SELECT attnum FROM pg_attribute WHERE attrelid = t.oid AND attname = 'guild_id'),
+        (SELECT attnum FROM pg_attribute WHERE attrelid = t.oid AND attname = 'birthday_discord_user_id'),
+        (SELECT attnum FROM pg_attribute WHERE attrelid = t.oid AND attname = 'birthday_date')
+      ]
+  ) THEN
+    ALTER TABLE cycles
+      ADD CONSTRAINT cycles_guild_birthday_unique
+      UNIQUE (guild_id, birthday_discord_user_id, birthday_date);
+  END IF;
+END $$;
 `;
 
 await withClient(async (client) => {

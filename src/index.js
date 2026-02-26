@@ -25,9 +25,16 @@ const client = new Client({
   partials: [Partials.Channel, Partials.Message, Partials.Reaction]
 });
 
-const TEST_MODE = String(process.env.TEST_MODE || '').toLowerCase() === 'true';
 const NOTIFICATIONS_ENABLED = String(process.env.NOTIFICATIONS_ENABLED ?? 'true').toLowerCase() !== 'false';
 let dailyCheckRunning = false;
+
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled rejection:', err);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+});
 
 function toLocalDateString(date) {
   const y = date.getFullYear();
@@ -169,8 +176,12 @@ async function postPaidStatus(thread, cycleId, participants, guild) {
   if (cycle && cycle.paid_status_message_id) {
     const msg = await thread.messages.fetch(cycle.paid_status_message_id).catch(() => null);
     if (msg) {
-      await msg.edit(content);
-      return;
+      try {
+        await msg.edit(content);
+        return;
+      } catch (err) {
+        console.error(`Failed to edit paid status message for cycle ${cycleId}:`, err);
+      }
     }
   }
 
@@ -537,63 +548,68 @@ async function dailyCheck() {
   });
 
   for (const user of users) {
-    const raw = user.birthday.toISOString ? toLocalDateString(user.birthday) : String(user.birthday).slice(0, 10);
-    const userBday = parseDateOnly(raw);
-    const bday = new Date(today.getFullYear(), userBday.getMonth(), userBday.getDate());
-    const triggerDate = addDays(bday, -21);
-    if (toLocalDateString(triggerDate) !== todayStr) continue;
+    try {
+      const raw = user.birthday.toISOString ? toLocalDateString(user.birthday) : String(user.birthday).slice(0, 10);
+      const userBday = parseDateOnly(raw);
+      const bday = new Date(today.getFullYear(), userBday.getMonth(), userBday.getDate());
+      const triggerDate = addDays(bday, -21);
+      if (toLocalDateString(triggerDate) !== todayStr) continue;
 
-    const existing = await withClient(async (db) => {
-      const res = await db.query(
-        'SELECT * FROM cycles WHERE guild_id = $1 AND birthday_discord_user_id = $2 AND birthday_date = $3',
-        [guild.id, user.discord_user_id, toLocalDateString(bday)]
-      );
-      return res.rows[0];
-    });
+      const claim = await withClient(async (db) => {
+        const res = await db.query(
+          `INSERT INTO cycles (guild_id, birthday_discord_user_id, birthday_date, status, created_at, updated_at)
+           VALUES ($1, $2, $3, 'planning', NOW(), NOW())
+           ON CONFLICT (guild_id, birthday_discord_user_id, birthday_date)
+           DO NOTHING
+           RETURNING id`,
+          [guild.id, user.discord_user_id, toLocalDateString(bday)]
+        );
+        return res.rows[0];
+      });
 
-    if (existing && existing.thread_id) continue;
+      if (!claim) continue;
 
-    const nameBase = user.name || (await guild.members.fetch(user.discord_user_id).catch(() => null))?.displayName || 'member';
-    const threadName = `${nameBase.toLowerCase().replace(/\s+/g, '-')}-${toLocalDateString(bday)}`;
+      const nameBase = user.name || (await guild.members.fetch(user.discord_user_id).catch(() => null))?.displayName || 'member';
+      const threadName = `${nameBase.toLowerCase().replace(/\s+/g, '-')}-${toLocalDateString(bday)}`;
 
-    const thread = await channel.threads.create({
-      name: threadName,
-      autoArchiveDuration: 1440,
-      reason: 'Birthday cycle starting'
-    });
+      const thread = await channel.threads.create({
+        name: threadName,
+        autoArchiveDuration: 1440,
+        reason: 'Birthday cycle starting'
+      });
 
-    await thread.permissionOverwrites.edit(user.discord_user_id, { ViewChannel: false });
+      await thread.permissionOverwrites.edit(user.discord_user_id, { ViewChannel: false });
 
-    if (!NOTIFICATIONS_ENABLED) {
-      console.log('NOTIFICATIONS_ENABLED=false: skipping DMs');
-    } else {
-      const members = await thread.members.fetch().catch(() => null);
-      if (members) {
-        for (const [memberId, member] of members) {
-          if (memberId === user.discord_user_id) continue;
-          if (memberId === client.user.id) continue;
-          try {
-            await member.user.send(`New birthday thread created: ${thread.name}\n${thread.url}`);
-          } catch (err) {
-            console.error(`DM failed for ${memberId}: ${err?.message || err}`);
+      await withClient(async (db) => {
+        await db.query(
+          "UPDATE cycles SET thread_id = $1, status = 'open', updated_at = NOW() WHERE id = $2",
+          [thread.id, claim.id]
+        );
+      });
+
+      if (!NOTIFICATIONS_ENABLED) {
+        console.log('NOTIFICATIONS_ENABLED=false: skipping DMs');
+      } else {
+        const members = await thread.members.fetch().catch(() => null);
+        if (members) {
+          for (const [memberId, member] of members) {
+            if (memberId === user.discord_user_id) continue;
+            if (memberId === client.user.id) continue;
+            try {
+              await member.user.send(`New birthday thread created: ${thread.name}\n${thread.url}`);
+            } catch (err) {
+              console.error(`DM failed for ${memberId}: ${err?.message || err}`);
+            }
           }
         }
       }
-    }
 
-    await thread.send(
-      'Welcome! Flow: suggest gifts with /suggest, vote with 👍, winner picked at T-5. After winner: /claim, then purchaser posts /receipt. Participants use /paid.'
-    );
-
-    await withClient(async (db) => {
-      await db.query(
-        `INSERT INTO cycles (guild_id, birthday_discord_user_id, birthday_date, thread_id, status)
-         VALUES ($1, $2, $3, $4, 'open')
-         ON CONFLICT (guild_id, birthday_discord_user_id, birthday_date)
-         DO UPDATE SET thread_id = EXCLUDED.thread_id, updated_at = NOW()`,
-        [guild.id, user.discord_user_id, toLocalDateString(bday), thread.id]
+      await thread.send(
+        'Welcome! Flow: suggest gifts with /suggest, vote with 👍, winner picked at T-5. After winner: /claim, then purchaser posts /receipt. Participants use /paid.'
       );
-    });
+    } catch (err) {
+      console.error(`dailyCheck user loop failed for ${user.discord_user_id}:`, err);
+    }
   }
 
   // Close voting at T-5
@@ -603,47 +619,51 @@ async function dailyCheck() {
   });
 
   for (const cycle of openCycles) {
-    const bday = parseDateOnly(String(cycle.birthday_date).slice(0, 10));
-    const closeDate = addDays(bday, -5);
-    if (toLocalDateString(closeDate) !== todayStr) continue;
+    try {
+      const bday = parseDateOnly(String(cycle.birthday_date).slice(0, 10));
+      const closeDate = addDays(bday, -5);
+      if (toLocalDateString(closeDate) !== todayStr) continue;
 
-    const thread = await guild.channels.fetch(cycle.thread_id).catch(() => null);
-    if (!thread) continue;
+      const thread = await guild.channels.fetch(cycle.thread_id).catch(() => null);
+      if (!thread) continue;
 
-    const suggestions = await withClient(async (db) => {
-      const res = await db.query('SELECT * FROM suggestions WHERE cycle_id = $1 ORDER BY created_at ASC', [cycle.id]);
-      return res.rows;
-    });
+      const suggestions = await withClient(async (db) => {
+        const res = await db.query('SELECT * FROM suggestions WHERE cycle_id = $1 ORDER BY created_at ASC', [cycle.id]);
+        return res.rows;
+      });
 
-    let winner = null;
-    let maxVotes = -1;
-    for (const s of suggestions) {
-      if (!s.message_id) continue;
-      const msg = await thread.messages.fetch(s.message_id).catch(() => null);
-      if (!msg) continue;
-      const reaction = msg.reactions.resolve('👍');
-      let count = reaction ? reaction.count : 0;
-      if (reaction?.me) count = Math.max(0, count - 1);
-      if (count > maxVotes) {
-        maxVotes = count;
-        winner = s;
+      let winner = null;
+      let maxVotes = -1;
+      for (const s of suggestions) {
+        if (!s.message_id) continue;
+        const msg = await thread.messages.fetch(s.message_id).catch(() => null);
+        if (!msg) continue;
+        const reaction = msg.reactions.resolve('👍');
+        let count = reaction ? reaction.count : 0;
+        if (reaction?.me) count = Math.max(0, count - 1);
+        if (count > maxVotes) {
+          maxVotes = count;
+          winner = s;
+        }
       }
-    }
 
-    if (winner) {
-      await withClient(async (db) => {
-        await db.query(
-          `UPDATE cycles SET winner_suggestion_id = $1, status = 'voting_closed', updated_at = NOW()
-           WHERE id = $2`,
-          [winner.id, cycle.id]
-        );
-      });
-      await thread.send(`Voting closed! Winner: ${winner.title || 'Gift'} (${winner.url})`);
-    } else {
-      await thread.send('Voting closed! No suggestions received.');
-      await withClient(async (db) => {
-        await db.query("UPDATE cycles SET status = 'voting_closed', updated_at = NOW() WHERE id = $1", [cycle.id]);
-      });
+      if (winner) {
+        await withClient(async (db) => {
+          await db.query(
+            `UPDATE cycles SET winner_suggestion_id = $1, status = 'voting_closed', updated_at = NOW()
+             WHERE id = $2`,
+            [winner.id, cycle.id]
+          );
+        });
+        await thread.send(`Voting closed! Winner: ${winner.title || 'Gift'} (${winner.url})`);
+      } else {
+        await thread.send('Voting closed! No suggestions received.');
+        await withClient(async (db) => {
+          await db.query("UPDATE cycles SET status = 'voting_closed', updated_at = NOW() WHERE id = $1", [cycle.id]);
+        });
+      }
+    } catch (err) {
+      console.error(`dailyCheck openCycles loop failed for cycle ${cycle.id}:`, err);
     }
   }
 
@@ -656,31 +676,39 @@ async function dailyCheck() {
   });
 
   for (const cycle of reminderCycles) {
-    const receiptAt = new Date(cycle.receipt_at);
-    const remindDate = addDays(receiptAt, 7);
-    if (toLocalDateString(remindDate) !== todayStr) continue;
+    try {
+      const receiptAt = new Date(cycle.receipt_at);
+      const remindDate = addDays(receiptAt, 7);
+      if (toLocalDateString(remindDate) !== todayStr) continue;
 
-    const participants = cycle.participants_snapshot_json || [];
-    const payments = await withClient(async (db) => {
-      const res = await db.query('SELECT payer_discord_user_id, paid_at FROM payments WHERE cycle_id = $1', [cycle.id]);
-      return res.rows;
-    });
-    const unpaid = participants.filter((id) => !payments.find((p) => p.payer_discord_user_id === id && p.paid_at));
-    const split = Math.round((Number(cycle.receipt_total) / participants.length) * 100) / 100;
+      const participants = cycle.participants_snapshot_json || [];
+      const payments = await withClient(async (db) => {
+        const res = await db.query('SELECT payer_discord_user_id, paid_at FROM payments WHERE cycle_id = $1', [cycle.id]);
+        return res.rows;
+      });
+      const unpaid = participants.filter((id) => !payments.find((p) => p.payer_discord_user_id === id && p.paid_at));
+      const split = Math.round((Number(cycle.receipt_total) / participants.length) * 100) / 100;
 
-    if (unpaid.length > 0) {
-      for (const userId of unpaid) {
-        const user = await client.users.fetch(userId).catch(() => null);
-        if (!user) continue;
-        await user.send(
-          `Reminder: Please pay $${split.toFixed(2)} for <@${cycle.birthday_discord_user_id}> and then type /paid in the thread.`
-        ).catch(() => null);
+      if (unpaid.length > 0) {
+        for (const userId of unpaid) {
+          try {
+            const user = await client.users.fetch(userId).catch(() => null);
+            if (!user) continue;
+            await user.send(
+              `Reminder: Please pay $${split.toFixed(2)} for <@${cycle.birthday_discord_user_id}> and then type /paid in the thread.`
+            );
+          } catch (err) {
+            console.error(`Reminder DM failed for ${userId}: ${err?.message || err}`);
+          }
+        }
       }
-    }
 
-    await withClient(async (db) => {
-      await db.query('UPDATE cycles SET reminder_sent_at = NOW() WHERE id = $1', [cycle.id]);
-    });
+      await withClient(async (db) => {
+        await db.query('UPDATE cycles SET reminder_sent_at = NOW() WHERE id = $1', [cycle.id]);
+      });
+    } catch (err) {
+      console.error(`dailyCheck reminder loop failed for cycle ${cycle.id}:`, err);
+    }
   }
 
   // Completion & archive
@@ -692,27 +720,31 @@ async function dailyCheck() {
   });
 
   for (const cycle of receiptCycles) {
-    const bday = parseDateOnly(String(cycle.birthday_date).slice(0, 10));
-    const doneDate = addDays(bday, 1);
-    if (toLocalDateString(doneDate) > todayStr) continue;
+    try {
+      const bday = parseDateOnly(String(cycle.birthday_date).slice(0, 10));
+      const doneDate = addDays(bday, 1);
+      if (toLocalDateString(doneDate) > todayStr) continue;
 
-    const participants = cycle.participants_snapshot_json || [];
-    const payments = await withClient(async (db) => {
-      const res = await db.query('SELECT payer_discord_user_id, paid_at FROM payments WHERE cycle_id = $1', [cycle.id]);
-      return res.rows;
-    });
-    const allPaid = participants.every((id) => payments.find((p) => p.payer_discord_user_id === id && p.paid_at));
-    if (!allPaid) continue;
+      const participants = cycle.participants_snapshot_json || [];
+      const payments = await withClient(async (db) => {
+        const res = await db.query('SELECT payer_discord_user_id, paid_at FROM payments WHERE cycle_id = $1', [cycle.id]);
+        return res.rows;
+      });
+      const allPaid = participants.every((id) => payments.find((p) => p.payer_discord_user_id === id && p.paid_at));
+      if (!allPaid) continue;
 
-    const thread = await guild.channels.fetch(cycle.thread_id).catch(() => null);
-    if (!thread) continue;
+      const thread = await guild.channels.fetch(cycle.thread_id).catch(() => null);
+      if (!thread) continue;
 
-    await thread.send('All payments complete. Thread will be archived.');
-    await thread.setArchived(true);
+      await thread.send('All payments complete. Thread will be archived.');
+      await thread.setArchived(true);
 
-    await withClient(async (db) => {
-      await db.query("UPDATE cycles SET status = 'completed', archived_at = NOW() WHERE id = $1", [cycle.id]);
-    });
+      await withClient(async (db) => {
+        await db.query("UPDATE cycles SET status = 'completed', archived_at = NOW() WHERE id = $1", [cycle.id]);
+      });
+    } catch (err) {
+      console.error(`dailyCheck receipt loop failed for cycle ${cycle.id}:`, err);
+    }
   }
 
   // Optional delete archived threads after N days
@@ -725,11 +757,15 @@ async function dailyCheck() {
     });
 
     for (const cycle of archived) {
-      const delDate = addDays(new Date(cycle.archived_at), CONFIG.AUTO_DELETE_ARCHIVED_DAYS);
-      if (toLocalDateString(delDate) !== todayStr) continue;
-      const thread = await guild.channels.fetch(cycle.thread_id).catch(() => null);
-      if (thread) {
-        await thread.delete().catch(() => null);
+      try {
+        const delDate = addDays(new Date(cycle.archived_at), CONFIG.AUTO_DELETE_ARCHIVED_DAYS);
+        if (toLocalDateString(delDate) !== todayStr) continue;
+        const thread = await guild.channels.fetch(cycle.thread_id).catch(() => null);
+        if (thread) {
+          await thread.delete().catch(() => null);
+        }
+      } catch (err) {
+        console.error(`dailyCheck archive cleanup failed for cycle ${cycle.id}:`, err);
       }
     }
   }
@@ -854,6 +890,10 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply({ content: 'Something went wrong.', flags: MessageFlags.Ephemeral }).catch(() => null);
     }
   }
+});
+
+client.on('error', (err) => {
+  console.error('Discord client error:', err);
 });
 
 client.once('ready', async () => {
