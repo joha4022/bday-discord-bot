@@ -43,6 +43,16 @@ function toLocalDateString(date) {
   return `${y}-${m}-${d}`;
 }
 
+function toTzDateString(date) {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: CONFIG.TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  });
+  return formatter.format(date);
+}
+
 function addDays(date, days) {
   const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
   d.setDate(d.getDate() + days);
@@ -539,7 +549,7 @@ async function dailyCheck() {
   await ensureCircle(guild.id);
 
   const today = new Date();
-  const todayStr = toLocalDateString(today);
+  const todayStr = toTzDateString(today);
 
   // Create threads at T-21
   const users = await withClient(async (db) => {
@@ -549,11 +559,16 @@ async function dailyCheck() {
 
   for (const user of users) {
     try {
-      const raw = user.birthday.toISOString ? toLocalDateString(user.birthday) : String(user.birthday).slice(0, 10);
+      const raw = user.birthday.toISOString ? toTzDateString(user.birthday) : String(user.birthday).slice(0, 10);
       const userBday = parseDateOnly(raw);
       const bday = new Date(today.getFullYear(), userBday.getMonth(), userBday.getDate());
       const triggerDate = addDays(bday, -21);
-      if (toLocalDateString(triggerDate) !== todayStr) continue;
+      const birthdayStr = toTzDateString(bday);
+      const triggerStr = toTzDateString(triggerDate);
+      if (triggerStr !== todayStr) {
+        console.log(`Skipping ${user.discord_user_id}: birthdayStr=${birthdayStr} triggerStr=${triggerStr} todayStr=${todayStr}`);
+        continue;
+      }
 
       const claim = await withClient(async (db) => {
         const res = await db.query(
@@ -562,7 +577,7 @@ async function dailyCheck() {
            ON CONFLICT (guild_id, birthday_discord_user_id, birthday_date)
            DO NOTHING
            RETURNING id`,
-          [guild.id, user.discord_user_id, toLocalDateString(bday)]
+          [guild.id, user.discord_user_id, birthdayStr]
         );
         return res.rows[0];
       });
