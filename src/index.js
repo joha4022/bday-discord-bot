@@ -25,6 +25,9 @@ const client = new Client({
   partials: [Partials.Channel, Partials.Message, Partials.Reaction]
 });
 
+const TEST_MODE = String(process.env.TEST_MODE || '').toLowerCase() === 'true';
+let dailyCheckRunning = false;
+
 function toLocalDateString(date) {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, '0');
@@ -552,8 +555,17 @@ async function dailyCheck() {
     const nameBase = user.name || (await guild.members.fetch(user.discord_user_id).catch(() => null))?.displayName || 'member';
     const threadName = `${nameBase.toLowerCase().replace(/\s+/g, '-')}-${toLocalDateString(bday)}`;
 
-    const message = await channel.send(`Birthday cycle starting for <@${user.discord_user_id}>. Thread created.`);
+    let message;
+    if (TEST_MODE) {
+      console.log('TEST_MODE: notification skipped');
+      message = await channel.send('.');
+    } else {
+      message = await channel.send(`Birthday cycle starting for <@${user.discord_user_id}>. Thread created.`);
+    }
     const thread = await message.startThread({ name: threadName, autoArchiveDuration: 1440 });
+    if (TEST_MODE) {
+      await message.delete().catch(() => null);
+    }
 
     await thread.permissionOverwrites.edit(user.discord_user_id, { ViewChannel: false });
 
@@ -711,6 +723,16 @@ async function dailyCheck() {
   }
 }
 
+async function dailyCheckGuarded() {
+  if (dailyCheckRunning) return;
+  dailyCheckRunning = true;
+  try {
+    await dailyCheck();
+  } finally {
+    dailyCheckRunning = false;
+  }
+}
+
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
@@ -824,8 +846,8 @@ client.on('interactionCreate', async (interaction) => {
 
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
-  cron.schedule(CONFIG.DAILY_CRON, dailyCheck, { timezone: CONFIG.TZ });
-  await dailyCheck();
+  cron.schedule(CONFIG.DAILY_CRON, dailyCheckGuarded, { timezone: CONFIG.TZ });
+  await dailyCheckGuarded();
 });
 
 client.login(CONFIG.DISCORD_TOKEN);
