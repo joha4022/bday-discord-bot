@@ -650,6 +650,34 @@ async function handleProfile(interaction) {
   await interaction.reply({ content: lines.join('\\n'), flags: MessageFlags.Ephemeral });
 }
 
+async function handleRegistered(interaction) {
+  const { guild } = await getGuildAndChannel();
+  if (!guild) {
+    await interaction.reply({ content: 'Guild not found.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const users = await withClient(async (db) => {
+    const res = await db.query('SELECT discord_user_id, birthday FROM users ORDER BY birthday ASC');
+    return res.rows;
+  });
+
+  if (!users.length) {
+    await interaction.reply({ content: 'No registered users yet.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const lines = users.map((u) => {
+    const member = guild.members.cache.get(u.discord_user_id);
+    const name = member ? member.displayName : `<@${u.discord_user_id}>`;
+    const bday = String(u.birthday).slice(0, 10);
+    return `${name}: ${bday}`;
+  });
+
+  const content = `Registered users:\n${lines.join('\n')}`;
+  await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+}
+
 async function handleMarkPaid(interaction, isPaid) {
   if (!ensureThreadOnly(interaction)) {
     await interaction.reply({ content: 'Please run this command inside a birthday thread.', flags: MessageFlags.Ephemeral });
@@ -1049,6 +1077,9 @@ client.on('interactionCreate', async (interaction) => {
           break;
         case 'profile':
           await handleProfile(interaction);
+          break;
+        case 'registered':
+          await handleRegistered(interaction);
           break;
         case 'mark-paid':
           await handleMarkPaid(interaction, true);
