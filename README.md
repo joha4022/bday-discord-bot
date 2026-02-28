@@ -43,12 +43,14 @@ openssl rand -hex 32
 Ensure the bot has these permissions in the server and `#bday` channel:
 - View Channel
 - Send Messages
-- Create Public Threads
+- Create Private Threads
 - Manage Threads (for archiving)
 - Read Message History
 - Add Reactions
 - Send Messages in Threads
 - Manage Messages (optional, for cleanup)
+
+Also enable the privileged Server Members Intent in the Discord developer portal, since the bot fetches the full guild member list when creating private birthday threads.
 
 ## Commands
 Global:

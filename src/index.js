@@ -159,7 +159,15 @@ async function ensureCircle(guildId) {
 
 async function getParticipantsForChannel(channel, birthdayUserId) {
   const guild = channel.guild;
-  const members = guild.members.cache.filter((m) => !m.user.bot);
+  let memberCollection;
+  try {
+    memberCollection = await guild.members.fetch();
+  } catch (err) {
+    console.error(`Failed to fetch guild members for ${guild.id}, falling back to cache:`, err);
+    memberCollection = guild.members.cache;
+  }
+
+  const members = memberCollection.filter((m) => !m.user.bot);
   const participants = [];
   for (const member of members.values()) {
     if (member.id === birthdayUserId) continue;
@@ -169,6 +177,34 @@ async function getParticipantsForChannel(channel, birthdayUserId) {
     }
   }
   return participants;
+}
+
+async function syncThreadParticipants(thread, channel, birthdayUserId) {
+  const participants = await getParticipantsForChannel(channel, birthdayUserId);
+  const expectedMembers = new Set(participants);
+  const threadMembers = await thread.members.fetch().catch(() => null);
+  const addedMemberIds = [];
+
+  for (const memberId of expectedMembers) {
+    if (memberId === client.user.id) continue;
+    if (threadMembers?.has(memberId)) continue;
+    try {
+      await thread.members.add(memberId);
+      addedMemberIds.push(memberId);
+    } catch (err) {
+      console.error(`Failed to add ${memberId} to thread ${thread.id}:`, err);
+    }
+  }
+
+  if (birthdayUserId !== client.user.id && threadMembers?.has(birthdayUserId)) {
+    try {
+      await thread.members.remove(birthdayUserId);
+    } catch (err) {
+      console.error(`Failed to remove birthday user ${birthdayUserId} from thread ${thread.id}:`, err);
+    }
+  }
+
+  return { addedMemberIds };
 }
 
 async function postPaidStatus(thread, cycleId, participants, guild) {
@@ -766,7 +802,13 @@ async function dailyCheck() {
 
       if (cycle.thread_id) {
         const existingThread = await guild.channels.fetch(cycle.thread_id).catch(() => null);
-        if (existingThread) continue;
+        if (existingThread) {
+          const { addedMemberIds } = await syncThreadParticipants(existingThread, channel, user.discord_user_id);
+          if (addedMemberIds.length) {
+            console.log(`Re-synced thread ${existingThread.id}; added ${addedMemberIds.length} missing members`);
+          }
+          continue;
+        }
       }
 
       const nameBase = user.name || (await guild.members.fetch(user.discord_user_id).catch(() => null))?.displayName || 'member';
@@ -779,15 +821,7 @@ async function dailyCheck() {
         reason: 'Birthday cycle starting'
       });
 
-      const participants = await getParticipantsForChannel(channel, user.discord_user_id);
-      for (const memberId of participants) {
-        if (memberId === client.user.id) continue;
-        try {
-          await thread.members.add(memberId);
-        } catch (err) {
-          console.error(`Failed to add ${memberId} to thread ${thread.id}:`, err);
-        }
-      }
+      await syncThreadParticipants(thread, channel, user.discord_user_id);
 
       await withClient(async (db) => {
         await db.query(
