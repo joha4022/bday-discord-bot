@@ -19,6 +19,9 @@ const commands = [
         .setRequired(true)
     ),
   new SlashCommandBuilder()
+    .setName('poll')
+    .setDescription('Start a vote with all proposed gift ideas (thread only)'),
+  new SlashCommandBuilder()
     .setName('claim')
     .setDescription('Claim purchaser for this cycle (thread only)'),
   new SlashCommandBuilder()

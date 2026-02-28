@@ -3,6 +3,7 @@ version: '3.9'
 services:
   postgres:
     image: postgres:16
+    container_name: bday-discord-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: circlebot
@@ -14,6 +15,7 @@ services:
 
   circlebot:
     image: node:20
+    container_name: bday-discord-bot
     restart: unless-stopped
     working_dir: /app
     environment:
@@ -32,6 +34,7 @@ services:
 
   pg_backup:
     image: alpine:3.19
+    container_name: bday-discord-pg-backup
     restart: unless-stopped
     environment:
       PGHOST: postgres

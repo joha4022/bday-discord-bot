@@ -91,6 +91,9 @@ BEGIN
       UNIQUE (guild_id, birthday_discord_user_id, birthday_date);
   END IF;
 END $$;
+
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS poll_message_id TEXT;
+ALTER TABLE cycles ADD COLUMN IF NOT EXISTS poll_answers_json JSONB;
 `;
 
 await withClient(async (client) => {

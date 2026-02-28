@@ -7,7 +7,8 @@ import {
   TextInputBuilder,
   TextInputStyle,
   ActionRowBuilder,
-  EmbedBuilder
+  EmbedBuilder,
+  ChannelType
 } from 'discord.js';
 import cron from 'node-cron';
 import { CONFIG } from './config.js';
@@ -158,7 +159,6 @@ async function ensureCircle(guildId) {
 
 async function getParticipantsForChannel(channel, birthdayUserId) {
   const guild = channel.guild;
-  await guild.members.fetch();
   const members = guild.members.cache.filter((m) => !m.user.bot);
   const participants = [];
   for (const member of members.values()) {
@@ -177,19 +177,22 @@ async function postPaidStatus(thread, cycleId, participants, guild) {
     return res.rows;
   });
   const paidSet = new Set(payments.filter((p) => p.paid_at).map((p) => p.payer_discord_user_id));
-  await guild.members.fetch();
-  const lines = participants.map((id) => {
+  const cycle = await withClient(async (db) => {
+    const res = await db.query('SELECT paid_status_message_id, purchaser_discord_user_id FROM cycles WHERE id = $1', [cycleId]);
+    return res.rows[0];
+  });
+
+  const visibleParticipants = cycle?.purchaser_discord_user_id
+    ? participants.filter((id) => id !== cycle.purchaser_discord_user_id)
+    : participants;
+
+  const lines = visibleParticipants.map((id) => {
     const member = guild.members.cache.get(id);
     const name = member ? member.displayName : id;
     const mark = paidSet.has(id) ? '✅' : '❌';
     return `${mark} ${name}`;
   });
   const content = `**Paid Status**\n${lines.join('\n')}`;
-
-  const cycle = await withClient(async (db) => {
-    const res = await db.query('SELECT paid_status_message_id FROM cycles WHERE id = $1', [cycleId]);
-    return res.rows[0];
-  });
 
   if (cycle && cycle.paid_status_message_id) {
     const msg = await thread.messages.fetch(cycle.paid_status_message_id).catch(() => null);
@@ -207,6 +210,68 @@ async function postPaidStatus(thread, cycleId, participants, guild) {
   await withClient(async (db) => {
     await db.query('UPDATE cycles SET paid_status_message_id = $1 WHERE id = $2', [msg.id, cycleId]);
   });
+}
+
+function normalizePollAnswerMap(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+async function getPollWinnerSuggestionId(thread, cycle) {
+  if (!cycle?.poll_message_id || !cycle?.poll_answers_json) return null;
+  const msg = await thread.messages.fetch(cycle.poll_message_id).catch(() => null);
+  if (!msg?.poll || !msg.poll.answers?.size) return null;
+
+  const answerMap = normalizePollAnswerMap(cycle.poll_answers_json);
+  if (!answerMap.length) return null;
+
+  const answersById = new Map(
+    Array.from(msg.poll.answers.values()).map((a) => [String(a.id), a])
+  );
+
+  async function getVoteCount(answer) {
+    if (!answer) return 0;
+    if (typeof answer.voteCount === 'number' && answer.voteCount > 0) return answer.voteCount;
+    try {
+      if (answer.voters?.fetch) {
+        const voters = await answer.voters.fetch();
+        return voters.size;
+      }
+      if (answer.fetchVoters) {
+        const voters = await answer.fetchVoters();
+        return voters.size;
+      }
+    } catch {
+      // Ignore and fall through to zero.
+    }
+    return typeof answer.voteCount === 'number' ? answer.voteCount : 0;
+  }
+
+  let best = null;
+  for (let i = 0; i < answerMap.length; i++) {
+    const entry = answerMap[i];
+    const answerId = entry ? String(entry.answerId ?? entry.answer_id ?? entry.id ?? '') : '';
+    const suggestionId = entry?.suggestionId ?? entry?.suggestion_id;
+    if (!answerId || !suggestionId) continue;
+    const answer = answersById.get(answerId);
+    if (!answer) continue;
+    const votes = await getVoteCount(answer);
+    if (!best || votes > best.votes) {
+      best = { suggestionId, votes, order: i };
+    }
+  }
+
+  if (!best || best.votes <= 0) return null;
+  return best.suggestionId;
 }
 
 async function updatePayment(thread, cycle, payerId, paidAt, override, note) {
@@ -288,6 +353,12 @@ async function handleRegisterModal(interaction) {
   });
 
   await interaction.reply({ content: existed ? 'Registration updated.' : 'Registration saved.', flags: MessageFlags.Ephemeral });
+
+  try {
+    await dailyCheckGuarded();
+  } catch (err) {
+    console.error('Post-register dailyCheck failed:', err);
+  }
 }
 
 function ensureThreadOnly(interaction) {
@@ -345,7 +416,6 @@ async function handleSuggest(interaction) {
   }
 
   const msg = await interaction.channel.send({ embeds: [embed] });
-  await msg.react('👍');
 
   await withClient(async (db) => {
     await db.query(
@@ -368,13 +438,27 @@ async function handleClaim(interaction) {
     await interaction.reply({ content: 'No active cycle found for this thread.', flags: MessageFlags.Ephemeral });
     return;
   }
-  if (!cycle.winner_suggestion_id) {
-    await interaction.reply({ content: 'Voting is not closed yet.', flags: MessageFlags.Ephemeral });
-    return;
-  }
   if (interaction.user.id === cycle.birthday_discord_user_id) {
     await interaction.reply({ content: 'Birthday person cannot claim.', flags: MessageFlags.Ephemeral });
     return;
+  }
+
+  if (!cycle.winner_suggestion_id) {
+    const winnerId = await getPollWinnerSuggestionId(interaction.channel, cycle);
+    if (!winnerId) {
+      await interaction.reply({
+        content: 'No winning suggestion yet. Run /poll and make sure someone votes before /claim.',
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
+    await withClient(async (db) => {
+      await db.query(
+        `UPDATE cycles SET winner_suggestion_id = $1, updated_at = NOW() WHERE id = $2`,
+        [winnerId, cycle.id]
+      );
+    });
+    cycle.winner_suggestion_id = winnerId;
   }
 
   const updated = await withClient(async (db) => {
@@ -401,11 +485,72 @@ async function handleClaim(interaction) {
     const address = decryptAddress({ ciphertext: birthdayUser.address_ciphertext, iv: birthdayUser.address_iv });
     const dm = await interaction.user.createDM();
     await dm.send(
-      `You claimed the gift!\nWinning link: ${suggestion ? suggestion.url : 'N/A'}\n\nShip to:\n${address.line1}${address.line2 ? `\n${address.line2}` : ''}\n${address.city}, ${address.state} ${address.postalCode}\n${address.country}`
+      `You claimed the gift!\nSend to: <@${cycle.birthday_discord_user_id}>\nWinning link: ${suggestion ? suggestion.url : 'N/A'}\n\nShip to:\n${address.line1}${address.line2 ? `\n${address.line2}` : ''}\n${address.city}, ${address.state} ${address.postalCode}`
     );
   }
 
   await interaction.reply({ content: 'You are the purchaser. Check your DMs for the address.', flags: MessageFlags.Ephemeral });
+}
+
+async function handlePoll(interaction) {
+  if (!ensureThreadOnly(interaction)) {
+    await interaction.reply({ content: 'Please run this command inside a birthday thread.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+  const cycle = await getCycleByThread(interaction.channelId);
+  if (!cycle) {
+    await interaction.reply({ content: 'No active cycle found for this thread.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const suggestions = await withClient(async (db) => {
+    const res = await db.query('SELECT * FROM suggestions WHERE cycle_id = $1 ORDER BY created_at ASC', [cycle.id]);
+    return res.rows;
+  });
+
+  if (!suggestions.length) {
+    await interaction.reply({ content: 'No suggestions yet.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const maxAnswers = 10;
+  const picked = suggestions.slice(0, maxAnswers);
+  const answers = picked.map((s) => ({
+    text: (s.title || s.url).slice(0, 55)
+  }));
+
+  const truncated = suggestions.length > maxAnswers;
+  const pollMessage = await interaction.reply({
+    content: truncated ? `Poll started with the first ${maxAnswers} suggestions.` : 'Poll started.',
+    poll: {
+      question: { text: 'Which gift should we get?' },
+      answers,
+      duration: 120,
+      allowMultiselect: false
+    },
+    fetchReply: true
+  });
+
+  const poll = pollMessage?.poll;
+  if (poll?.answers?.size) {
+    const pollAnswers = Array.from(poll.answers.values());
+    const answerMap = pollAnswers.map((a, idx) => ({
+      answerId: String(a.id),
+      suggestionId: picked[idx]?.id
+    })).filter((entry) => entry.suggestionId);
+
+    await withClient(async (db) => {
+      await db.query(
+        `UPDATE cycles
+         SET poll_message_id = $1,
+             poll_answers_json = $2,
+             winner_suggestion_id = NULL,
+             updated_at = NOW()
+         WHERE id = $3`,
+        [pollMessage.id, JSON.stringify(answerMap), cycle.id]
+      );
+    });
+  }
 }
 
 async function handleReceipt(interaction) {
@@ -505,7 +650,7 @@ async function handleStatus(interaction) {
   const winner = cycle.winner_suggestion_id ? 'Selected' : 'Pending';
   const receipt = cycle.receipt_total ? `$${Number(cycle.receipt_total).toFixed(2)}` : 'Not posted';
   await interaction.reply({
-    content: `Status:\nWinner: ${winner}\nPurchaser: ${purchaser}\nReceipt: ${receipt}`,
+    content: `Gift Item: ${winner}\nPurchaser: ${purchaser}\nReceipt: ${receipt}`,
     flags: MessageFlags.Ephemeral
   });
 }
@@ -576,27 +721,40 @@ async function dailyCheck() {
       const raw = user.birthday.toISOString ? toTzDateString(user.birthday) : String(user.birthday).slice(0, 10);
       const userBday = parseDateOnly(raw);
       const bday = new Date(today.getFullYear(), userBday.getMonth(), userBday.getDate());
-      const triggerDate = addDays(bday, -21);
       const birthdayStr = toTzDateString(bday);
-      const triggerStr = toTzDateString(triggerDate);
-      if (triggerStr !== todayStr) {
-        console.log(`Skipping ${user.discord_user_id}: birthdayStr=${birthdayStr} triggerStr=${triggerStr} todayStr=${todayStr}`);
+      const daysUntil = Math.round(
+        (Date.UTC(bday.getFullYear(), bday.getMonth(), bday.getDate()) -
+          Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())) /
+          86400000
+      );
+      if (daysUntil < 0 || daysUntil > 21) {
+        console.log(`Skipping ${user.discord_user_id}: birthdayStr=${birthdayStr} daysUntil=${daysUntil} todayStr=${todayStr}`);
         continue;
       }
 
-      const claim = await withClient(async (db) => {
+      const cycle = await withClient(async (db) => {
         const res = await db.query(
           `INSERT INTO cycles (guild_id, birthday_discord_user_id, birthday_date, status, created_at, updated_at)
            VALUES ($1, $2, $3, 'planning', NOW(), NOW())
            ON CONFLICT (guild_id, birthday_discord_user_id, birthday_date)
            DO NOTHING
-           RETURNING id`,
+           RETURNING *`,
           [guild.id, user.discord_user_id, birthdayStr]
         );
-        return res.rows[0];
+        if (res.rows[0]) return res.rows[0];
+        const existing = await db.query(
+          'SELECT * FROM cycles WHERE guild_id = $1 AND birthday_discord_user_id = $2 AND birthday_date = $3',
+          [guild.id, user.discord_user_id, birthdayStr]
+        );
+        return existing.rows[0] || null;
       });
 
-      if (!claim) continue;
+      if (!cycle) continue;
+
+      if (cycle.thread_id) {
+        const existingThread = await guild.channels.fetch(cycle.thread_id).catch(() => null);
+        if (existingThread) continue;
+      }
 
       const nameBase = user.name || (await guild.members.fetch(user.discord_user_id).catch(() => null))?.displayName || 'member';
       const threadName = `${nameBase.toLowerCase().replace(/\s+/g, '-')}-${toLocalDateString(bday)}`;
@@ -604,15 +762,24 @@ async function dailyCheck() {
       const thread = await channel.threads.create({
         name: threadName,
         autoArchiveDuration: 1440,
+        type: ChannelType.PrivateThread,
         reason: 'Birthday cycle starting'
       });
 
-      await thread.permissionOverwrites.edit(user.discord_user_id, { ViewChannel: false });
+      const participants = await getParticipantsForChannel(channel, user.discord_user_id);
+      for (const memberId of participants) {
+        if (memberId === client.user.id) continue;
+        try {
+          await thread.members.add(memberId);
+        } catch (err) {
+          console.error(`Failed to add ${memberId} to thread ${thread.id}:`, err);
+        }
+      }
 
       await withClient(async (db) => {
         await db.query(
           "UPDATE cycles SET thread_id = $1, status = 'open', updated_at = NOW() WHERE id = $2",
-          [thread.id, claim.id]
+          [thread.id, cycle.id]
         );
       });
 
@@ -634,7 +801,21 @@ async function dailyCheck() {
       }
 
       await thread.send(
-        'Welcome! Flow: suggest gifts with /suggest, vote with 👍, winner picked at T-5. After winner: /claim, then purchaser posts /receipt. Participants use /paid.'
+        [
+          ':bulb: **/suggest** <link> — propose gifts',
+          '',
+          ':thumbsup: **/poll**— to start a vote with all the proposed gift ideas',
+          '',
+          ':shopping_cart: **/claim** — first claim becomes purchaser',
+          '',
+          ':receipt: **/receipt** total:<amount> — split cost',
+          '',
+          ":money_with_wings: **/paid** — to note that you've sent your share",
+          '',
+          ':bell: If you forget /paid, the bot DMs you on the birthday date',
+          '',
+          ':warning: Admins can technically see everything — don’t spoil surprises :slight_smile:'
+        ].join('\n')
       );
     } catch (err) {
       console.error(`dailyCheck user loop failed for ${user.discord_user_id}:`, err);
@@ -661,42 +842,21 @@ async function dailyCheck() {
         return res.rows;
       });
 
-      let winner = null;
-      let maxVotes = -1;
-      for (const s of suggestions) {
-        if (!s.message_id) continue;
-        const msg = await thread.messages.fetch(s.message_id).catch(() => null);
-        if (!msg) continue;
-        const reaction = msg.reactions.resolve('👍');
-        let count = reaction ? reaction.count : 0;
-        if (reaction?.me) count = Math.max(0, count - 1);
-        if (count > maxVotes) {
-          maxVotes = count;
-          winner = s;
-        }
-      }
-
-      if (winner) {
-        await withClient(async (db) => {
-          await db.query(
-            `UPDATE cycles SET winner_suggestion_id = $1, status = 'voting_closed', updated_at = NOW()
-             WHERE id = $2`,
-            [winner.id, cycle.id]
-          );
-        });
-        await thread.send(`Voting closed! Winner: ${winner.title || 'Gift'} (${winner.url})`);
+      if (suggestions.length) {
+        await thread.send('Voting closed! Decide on a winner and have someone /claim.');
       } else {
         await thread.send('Voting closed! No suggestions received.');
-        await withClient(async (db) => {
-          await db.query("UPDATE cycles SET status = 'voting_closed', updated_at = NOW() WHERE id = $1", [cycle.id]);
-        });
       }
+
+      await withClient(async (db) => {
+        await db.query("UPDATE cycles SET status = 'voting_closed', updated_at = NOW() WHERE id = $1", [cycle.id]);
+      });
     } catch (err) {
       console.error(`dailyCheck openCycles loop failed for cycle ${cycle.id}:`, err);
     }
   }
 
-  // 7-day reminders after receipt
+  // Birthday-day reminders after receipt
   const reminderCycles = await withClient(async (db) => {
     const res = await db.query(
       "SELECT * FROM cycles WHERE receipt_at IS NOT NULL AND reminder_sent_at IS NULL AND participants_snapshot_json IS NOT NULL"
@@ -706,9 +866,8 @@ async function dailyCheck() {
 
   for (const cycle of reminderCycles) {
     try {
-      const receiptAt = new Date(cycle.receipt_at);
-      const remindDate = addDays(receiptAt, 7);
-      if (toLocalDateString(remindDate) !== todayStr) continue;
+      const bday = parseDateOnly(String(cycle.birthday_date).slice(0, 10));
+      if (toLocalDateString(bday) !== todayStr) continue;
 
       const participants = cycle.participants_snapshot_json || [];
       const payments = await withClient(async (db) => {
@@ -883,6 +1042,9 @@ client.on('interactionCreate', async (interaction) => {
         }
         case 'suggest':
           await handleSuggest(interaction);
+          break;
+        case 'poll':
+          await handlePoll(interaction);
           break;
         case 'claim':
           await handleClaim(interaction);
