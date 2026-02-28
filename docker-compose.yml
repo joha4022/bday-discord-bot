@@ -12,6 +12,11 @@ services:
       TZ: ${TZ}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U circlebot -d circlebot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   circlebot:
     image: node:20
@@ -30,7 +35,8 @@ services:
       - ./:/app
     command: sh -c "npm install && npm run migrate && npm run register:commands && npm run start"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
   pg_backup:
     image: alpine:3.19
