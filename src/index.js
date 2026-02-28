@@ -825,7 +825,7 @@ async function dailyCheck() {
           '',
           ":money_with_wings: **/paid** — to note that you've sent your share",
           '',
-          ':bell: If you forget /paid, the bot DMs you on the birthday date',
+          ':bell: If you forget **/paid**, the bot DMs you on the birthday date',
           '',
           ':warning: Admins can technically see everything — don’t spoil surprises :slight_smile:'
         ].join('\n')
