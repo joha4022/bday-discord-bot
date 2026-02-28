@@ -672,7 +672,9 @@ async function handleRegistered(interaction) {
   const lines = users.map((u) => {
     const member = guild.members.cache.get(u.discord_user_id);
     const name = member ? member.displayName : `<@${u.discord_user_id}>`;
-    const bday = String(u.birthday).slice(0, 10);
+    const bday = u.birthday instanceof Date
+      ? u.birthday.toISOString().slice(0, 10)
+      : String(u.birthday).slice(0, 10);
     const address = decryptAddress({ ciphertext: u.address_ciphertext, iv: u.address_iv });
     const line2 = address.line2 ? `, ${address.line2}` : '';
     const addr = `${address.line1}${line2}, ${address.city}, ${address.state} ${address.postalCode}`;
