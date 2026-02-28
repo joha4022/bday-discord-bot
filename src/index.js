@@ -385,35 +385,13 @@ async function handleSuggest(interaction) {
   }
 
   const url = interaction.options.getString('url');
-  const { count, latest } = await withClient(async (db) => {
-    const res = await db.query(
-      'SELECT COUNT(*)::int AS count, MAX(created_at) AS latest FROM suggestions WHERE cycle_id = $1 AND suggester_discord_user_id = $2',
-      [cycle.id, interaction.user.id]
-    );
-    return res.rows[0];
-  });
-
-  if (count >= 3) {
-    await interaction.reply({ content: 'Suggestion limit reached (3 per user).', flags: MessageFlags.Ephemeral });
-    return;
-  }
-  if (latest) {
-    const diff = Date.now() - new Date(latest).getTime();
-    if (diff < 60 * 1000) {
-      await interaction.reply({ content: 'Please wait 1 minute between suggestions.', flags: MessageFlags.Ephemeral });
-      return;
-    }
-  }
-
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   const meta = await fetchUrlMeta(url);
   const embed = new EmbedBuilder()
     .setTitle(meta.title || 'Gift Suggestion')
     .setDescription(url)
     .setColor(0x2f855a);
-  if (meta.price) {
-    embed.addFields({ name: 'Price', value: meta.price, inline: true });
-  }
+  // Price display removed per request
 
   const msg = await interaction.channel.send({ embeds: [embed] });
 
@@ -856,10 +834,10 @@ async function dailyCheck() {
     }
   }
 
-  // Birthday-day reminders after receipt
+  // Birthday-day + weekly reminders after receipt until all paid
   const reminderCycles = await withClient(async (db) => {
     const res = await db.query(
-      "SELECT * FROM cycles WHERE receipt_at IS NOT NULL AND reminder_sent_at IS NULL AND participants_snapshot_json IS NOT NULL"
+      "SELECT * FROM cycles WHERE receipt_at IS NOT NULL AND participants_snapshot_json IS NOT NULL AND archived_at IS NULL"
     );
     return res.rows;
   });
@@ -867,7 +845,18 @@ async function dailyCheck() {
   for (const cycle of reminderCycles) {
     try {
       const bday = parseDateOnly(String(cycle.birthday_date).slice(0, 10));
-      if (toLocalDateString(bday) !== todayStr) continue;
+      const bdayStr = toLocalDateString(bday);
+      let shouldRemind = false;
+      if (bdayStr === todayStr) {
+        shouldRemind = true;
+      } else {
+        const last = cycle.reminder_sent_at ? new Date(cycle.reminder_sent_at) : bday;
+        const next = addDays(last, 7);
+        if (toLocalDateString(next) === todayStr) {
+          shouldRemind = true;
+        }
+      }
+      if (!shouldRemind) continue;
 
       const participants = cycle.participants_snapshot_json || [];
       const payments = await withClient(async (db) => {
@@ -889,11 +878,11 @@ async function dailyCheck() {
             console.error(`Reminder DM failed for ${userId}: ${err?.message || err}`);
           }
         }
-      }
 
-      await withClient(async (db) => {
-        await db.query('UPDATE cycles SET reminder_sent_at = NOW() WHERE id = $1', [cycle.id]);
-      });
+        await withClient(async (db) => {
+          await db.query('UPDATE cycles SET reminder_sent_at = NOW() WHERE id = $1', [cycle.id]);
+        });
+      }
     } catch (err) {
       console.error(`dailyCheck reminder loop failed for cycle ${cycle.id}:`, err);
     }

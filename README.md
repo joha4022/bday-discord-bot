@@ -6,7 +6,7 @@ Discord bot for birthday gift cycles in a single `#bday` channel. Runs on Unraid
 - Single channel with per-birthday threads (created T-21).
 - Surprise mode: birthday person cannot view their thread.
 - Suggest → `/poll` vote → winner (T-5) → claim → receipt → split → `/paid` tracking.
-- Birthday‑day DM reminders for unpaid participants (after receipt).
+- Birthday‑day DM reminder for unpaid participants (after receipt), then weekly until paid.
 - Purchaser overrides: `/mark-paid` and `/mark-unpaid`.
 - AES‑256‑GCM encryption for address storage.
 - Daily cron scheduler (no in‑memory timers only).
@@ -69,7 +69,7 @@ If run outside a birthday thread, the bot responds with:
 
 ## Scheduler
 - Daily cron set by `DAILY_CRON` (default: `0 9 * * *` local time).
-- Creates threads at T‑21, closes voting at T‑5, sends reminders on the birthday date (after receipt), and archives when complete.
+- Creates threads at T‑21, closes voting at T‑5, sends reminders on the birthday date (after receipt) and weekly until paid, and archives when complete.
 
 ## Data Storage
 - Postgres tables: `users`, `circles`, `cycles`, `suggestions`, `payments`, `registration_sessions`.
