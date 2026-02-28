@@ -658,7 +658,9 @@ async function handleRegistered(interaction) {
   }
 
   const users = await withClient(async (db) => {
-    const res = await db.query('SELECT discord_user_id, birthday FROM users ORDER BY birthday ASC');
+    const res = await db.query(
+      'SELECT discord_user_id, birthday, address_ciphertext, address_iv FROM users ORDER BY birthday ASC'
+    );
     return res.rows;
   });
 
@@ -671,7 +673,10 @@ async function handleRegistered(interaction) {
     const member = guild.members.cache.get(u.discord_user_id);
     const name = member ? member.displayName : `<@${u.discord_user_id}>`;
     const bday = String(u.birthday).slice(0, 10);
-    return `${name}: ${bday}`;
+    const address = decryptAddress({ ciphertext: u.address_ciphertext, iv: u.address_iv });
+    const line2 = address.line2 ? `, ${address.line2}` : '';
+    const addr = `${address.line1}${line2}, ${address.city}, ${address.state} ${address.postalCode}`;
+    return `${name}: ${bday} — ${addr}`;
   });
 
   const content = `Registered users:\n${lines.join('\n')}`;
