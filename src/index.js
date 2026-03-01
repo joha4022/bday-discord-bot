@@ -179,6 +179,31 @@ async function getParticipantsForChannel(channel, birthdayUserId) {
   return participants;
 }
 
+async function getParticipantsForThread(thread, birthdayUserId) {
+  let memberCollection;
+  try {
+    memberCollection = await thread.members.fetch();
+  } catch (err) {
+    console.error(`Failed to fetch thread members for ${thread.id}, falling back to cache:`, err);
+    memberCollection = thread.members.cache;
+  }
+
+  const participants = [];
+  for (const member of memberCollection.values()) {
+    const memberId = member.id;
+    if (!memberId) continue;
+    if (memberId === client.user.id) continue;
+    if (memberId === birthdayUserId) continue;
+    participants.push(memberId);
+  }
+  return participants;
+}
+
+function getPayingParticipants(participants, purchaserUserId) {
+  if (!purchaserUserId) return participants;
+  return participants.filter((id) => id !== purchaserUserId);
+}
+
 async function syncThreadParticipants(thread, channel, birthdayUserId) {
   const participants = await getParticipantsForChannel(channel, birthdayUserId);
   const expectedMembers = new Set(participants);
@@ -218,9 +243,7 @@ async function postPaidStatus(thread, cycleId, participants, guild) {
     return res.rows[0];
   });
 
-  const visibleParticipants = cycle?.purchaser_discord_user_id
-    ? participants.filter((id) => id !== cycle.purchaser_discord_user_id)
-    : participants;
+  const visibleParticipants = getPayingParticipants(participants, cycle?.purchaser_discord_user_id);
 
   const lines = visibleParticipants.map((id) => {
     const member = guild.members.cache.get(id);
@@ -588,12 +611,7 @@ async function handleReceipt(interaction) {
     return;
   }
 
-  const { channel } = await getGuildAndChannel();
-  if (!channel) {
-    await interaction.reply({ content: 'Channel not found.', flags: MessageFlags.Ephemeral });
-    return;
-  }
-  const participants = await getParticipantsForChannel(channel, cycle.birthday_discord_user_id);
+  const participants = await getParticipantsForThread(interaction.channel, cycle.birthday_discord_user_id);
   const count = participants.length;
   if (count === 0) {
     await interaction.reply({ content: 'No participants found for split.', flags: MessageFlags.Ephemeral });
@@ -928,11 +946,12 @@ async function dailyCheck() {
       if (!shouldRemind) continue;
 
       const participants = cycle.participants_snapshot_json || [];
+      const payingParticipants = getPayingParticipants(participants, cycle.purchaser_discord_user_id);
       const payments = await withClient(async (db) => {
         const res = await db.query('SELECT payer_discord_user_id, paid_at FROM payments WHERE cycle_id = $1', [cycle.id]);
         return res.rows;
       });
-      const unpaid = participants.filter((id) => !payments.find((p) => p.payer_discord_user_id === id && p.paid_at));
+      const unpaid = payingParticipants.filter((id) => !payments.find((p) => p.payer_discord_user_id === id && p.paid_at));
       const split = Math.round((Number(cycle.receipt_total) / participants.length) * 100) / 100;
 
       if (unpaid.length > 0) {
@@ -972,11 +991,12 @@ async function dailyCheck() {
       if (toLocalDateString(doneDate) > todayStr) continue;
 
       const participants = cycle.participants_snapshot_json || [];
+      const payingParticipants = getPayingParticipants(participants, cycle.purchaser_discord_user_id);
       const payments = await withClient(async (db) => {
         const res = await db.query('SELECT payer_discord_user_id, paid_at FROM payments WHERE cycle_id = $1', [cycle.id]);
         return res.rows;
       });
-      const allPaid = participants.every((id) => payments.find((p) => p.payer_discord_user_id === id && p.paid_at));
+      const allPaid = payingParticipants.every((id) => payments.find((p) => p.payer_discord_user_id === id && p.paid_at));
       if (!allPaid) continue;
 
       const thread = await guild.channels.fetch(cycle.thread_id).catch(() => null);
