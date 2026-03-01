@@ -739,6 +739,27 @@ async function handleRegistered(interaction) {
   await interaction.reply({ content, flags: MessageFlags.Ephemeral });
 }
 
+async function handleRemove(interaction) {
+  if (!interaction.memberPermissions?.has('ManageGuild')) {
+    await interaction.reply({ content: 'You need Manage Server permission to use this.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const target = interaction.options.getUser('user', true);
+  const removed = await withClient(async (db) => {
+    const res = await db.query('DELETE FROM users WHERE discord_user_id = $1', [target.id]);
+    await db.query('DELETE FROM registration_sessions WHERE discord_user_id = $1', [target.id]);
+    return res.rowCount === 1;
+  });
+
+  if (!removed) {
+    await interaction.reply({ content: 'That user is not registered.', flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  await interaction.reply({ content: `${target.username} was removed from registered users.`, flags: MessageFlags.Ephemeral });
+}
+
 async function handleMarkPaid(interaction, isPaid) {
   if (!ensureThreadOnly(interaction)) {
     await interaction.reply({ content: 'Please run this command inside a birthday thread.', flags: MessageFlags.Ephemeral });
@@ -1141,6 +1162,9 @@ client.on('interactionCreate', async (interaction) => {
           break;
         case 'registered':
           await handleRegistered(interaction);
+          break;
+        case 'remove':
+          await handleRemove(interaction);
           break;
         case 'mark-paid':
           await handleMarkPaid(interaction, true);

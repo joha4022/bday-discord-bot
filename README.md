@@ -55,6 +55,7 @@ Also enable the privileged Server Members Intent in the Discord developer portal
 ## Commands
 Global:
 - `/register birthday:YYYY-MM-DD` → opens private modals for address + payment info
+- `/remove user:@User` → manager-only; removes that user from stored registrations
 
 Thread-only:
 - `/suggest url:<link>`
@@ -76,6 +77,7 @@ If run outside a birthday thread, the bot responds with:
 ## Data Storage
 - Postgres tables: `users`, `circles`, `cycles`, `suggestions`, `payments`, `registration_sessions`.
 - Addresses are encrypted before storage and only decrypted for purchaser DMs.
+- Removing a user clears their saved registration, but does not retroactively delete existing cycle history.
 
 ## Backups
 - Nightly `pg_dump` to `/mnt/user/backups/autogift/`

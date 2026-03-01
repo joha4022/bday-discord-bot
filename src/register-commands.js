@@ -45,6 +45,14 @@ const commands = [
     .setName('registered')
     .setDescription('List all registered users and birthdays'),
   new SlashCommandBuilder()
+    .setName('remove')
+    .setDescription('Remove a registered user')
+    .addUserOption((opt) =>
+      opt.setName('user')
+        .setDescription('User to remove from registrations')
+        .setRequired(true)
+    ),
+  new SlashCommandBuilder()
     .setName('mark-paid')
     .setDescription('Purchaser override: mark a user paid')
     .addUserOption((opt) =>
